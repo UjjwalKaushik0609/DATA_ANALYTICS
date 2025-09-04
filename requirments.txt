@@ -1,6 +1,7 @@
 streamlit
-pandas
+pandas>=2.0
 numpy
-seaborn
-matplotlib
 scikit-learn
+plotly
+ydata-profiling
+streamlit-ydata-profiling
