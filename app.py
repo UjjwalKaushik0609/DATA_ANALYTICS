@@ -64,16 +64,20 @@ if cat_cols:
 df_fe = df_clean.copy()
 if cat_cols:
     df_fe = pd.get_dummies(df_fe, columns=cat_cols, drop_first=True, dtype=int)
-if numeric_cols:
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    df_fe[numeric_cols] = scaler.fit_transform(df_fe[numeric_cols])
+
+# Manual z-score scaling without sklearn
+for col in numeric_cols:
+    mean, std = df_fe[col].mean(), df_fe[col].std()
+    if std != 0:
+        df_fe[col] = (df_fe[col] - mean) / std
+
 for dcol in datetime_cols:
     d = pd.to_datetime(df_fe[dcol], errors="coerce")
     df_fe[f"{dcol}_year"] = d.dt.year
     df_fe[f"{dcol}_month"] = d.dt.month
     df_fe[f"{dcol}_day"] = d.dt.day
     df_fe[f"{dcol}_dow"] = d.dt.dayofweek
+
 for col in df.columns:
     if df[col].dtype == "object":
         df_fe[f"{col}_len"] = df[col].astype(str).str.len()
