@@ -1,135 +1,190 @@
-import io, json
-from datetime import datetime
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from sklearn.preprocessing import LabelEncoder
+import time
 
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-except:
-    px = None
-    go = None
+# --- Setup and Utility Functions ---
 
-try:
-    from ydata_profiling import ProfileReport
-    from streamlit_ydata_profiling import st_profile_report
-    HAS_PROFILING = True
-except:
-    HAS_PROFILING = False
+# Streamlit cache ensures the heavy data cleaning only runs once per file upload.
+@st.cache_data(show_spinner="Running Automated Data Preparation and Cleaning...")
+def automated_cleaning_and_engineering(df):
+    
+    # Work on a copy of the DataFrame
+    df_cleaned = df.copy()
+    cleaning_log = []
+    
+    # 1. Duplicate Removal
+    duplicate_rows = df_cleaned.duplicated().sum()
+    if duplicate_rows > 0:
+        df_cleaned.drop_duplicates(inplace=True)
+        cleaning_log.append(f"🗑 *Removed Duplicates:* Found and removed *{duplicate_rows}* duplicate rows.")
+    else:
+        cleaning_log.append("👍 *Duplicate Check:* No duplicate rows found.")
 
-st.set_page_config(page_title="Auto Data Analytics Studio", page_icon="🤖", layout="wide")
+    # 2. Missing Value Imputation
+    missing_data = df_cleaned.isnull().sum()
+    missing_cols = missing_data[missing_data > 0]
 
-st.title("🤖 Automated Data Analytics Studio")
-st.caption("Upload a CSV → automatic cleaning, feature engineering, visualization, dashboard, and report generation.")
-
-# ---------------- Load Data ----------------
-upload = st.file_uploader("Upload a CSV file", type=["csv"])
-if upload is None:
-    st.info("👋 Upload a CSV file to begin.")
-    st.stop()
-
-try:
-    df = pd.read_csv(upload, sep=None, engine="python")
-except Exception as e:
-    st.error(f"Failed to read CSV: {e}")
-    st.stop()
-
-st.success(f"Loaded dataset with {df.shape[0]:,} rows × {df.shape[1]:,} columns.")
-
-# ---------------- Detect Column Types ----------------
-numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-datetime_cols, cat_cols = [], []
-for col in df.columns:
-    if df[col].dtype == "object":
-        try:
-            parsed = pd.to_datetime(df[col], errors="raise")
-            if parsed.notna().mean() > 0.9:
-                datetime_cols.append(col)
+    if not missing_cols.empty:
+        cleaning_log.append("#### ⚠ *Missing Value Imputation:*")
+        
+        for col in missing_cols.index:
+            missing_count = missing_cols[col]
+            if pd.api.types.is_numeric_dtype(df_cleaned[col]):
+                # Impute numeric missing values with the median
+                median_val = df_cleaned[col].median()
+                df_cleaned[col].fillna(median_val, inplace=True)
+                cleaning_log.append(f"   - Imputed *{missing_count}* missing values in *{col}* (Numeric) with the *Median* ({median_val:.2f}).")
             else:
-                cat_cols.append(col)
-        except:
-            cat_cols.append(col)
-    elif "datetime" in str(df[col].dtype):
-        datetime_cols.append(col)
+                # Impute categorical missing values with the mode
+                mode_val = df_cleaned[col].mode().iloc[0] # Use iloc[0] for robustness
+                df_cleaned[col].fillna(mode_val, inplace=True)
+                cleaning_log.append(f"   - Imputed *{missing_count}* missing values in *{col}* (Categorical) with the *Mode* ('{mode_val}').")
+    else:
+        cleaning_log.append("🎉 *Missing Values:* No missing values found! Data is complete.")
+        
+    
+    # 3. Feature Engineering: Categorical Encoding (for Visualization/Analysis)
+    le = LabelEncoder()
+    encoding_count = 0
+    
+    for col in df_cleaned.columns:
+        # Check if the column is categorical/object and has few unique values (low-cardinality)
+        if df_cleaned[col].dtype == 'object' and len(df_cleaned[col].unique()) <= 50:
+            try:
+                # Perform encoding and save to a new column
+                df_cleaned[f'{col}_Encoded'] = le.fit_transform(df_cleaned[col])
+                cleaning_log.append(f"✏ *Feature Engineering (Encoding):* Created new column *{col}_Encoded* by *Label Encoding* the original categorical column.")
+                encoding_count += 1
+            except Exception:
+                pass # Skip if encoding fails
+                
+    if encoding_count == 0:
+        cleaning_log.append("ℹ *Feature Engineering (Encoding):* No low-cardinality categorical columns found for automatic Label Encoding.")
 
-# ---------------- Auto Cleaning ----------------
-df_clean = df.copy()
-if numeric_cols:
-    df_clean[numeric_cols] = df_clean[numeric_cols].fillna(df_clean[numeric_cols].median())
-if cat_cols:
-    df_clean[cat_cols] = df_clean[cat_cols].fillna(df_clean[cat_cols].mode().iloc[0])
+    # 4. Feature Engineering: Date/Time Extraction
+    # Identify potential date/time columns by keyword
+    datetime_cols = [col for col in df_cleaned.columns if 'date' in col.lower() or 'time' in col.lower()]
+    dt_count = 0
+    
+    for col in datetime_cols:
+        try:
+            # Attempt to convert to datetime
+            df_cleaned[col] = pd.to_datetime(df_cleaned[col], errors='coerce')
+            
+            # If the conversion was successful and not all values became NaT
+            if not df_cleaned[col].isnull().all():
+                # Extract new features
+                df_cleaned[f'{col}_Year'] = df_cleaned[col].dt.year
+                df_cleaned[f'{col}_Month'] = df_cleaned[col].dt.month
+                df_cleaned[f'{col}_Day'] = df_cleaned[col].dt.day
+                cleaning_log.append(f"🆕 *Feature Engineering (Date/Time):* Extracted *Year, Month, and Day* features from column *{col}*.")
+                dt_count += 1
+        except Exception:
+             pass # Skip if date conversion fails
+             
+    if dt_count == 0:
+        cleaning_log.append("ℹ *Feature Engineering (Date/Time):* No valid date/time columns found for extraction.")
 
-# ---------------- Auto Feature Engineering ----------------
-df_fe = df_clean.copy()
-if cat_cols:
-    df_fe = pd.get_dummies(df_fe, columns=cat_cols, drop_first=True, dtype=int)
+    
+    return df_cleaned, cleaning_log
 
-# Manual z-score scaling without sklearn
-for col in numeric_cols:
-    mean, std = df_fe[col].mean(), df_fe[col].std()
-    if std != 0:
-        df_fe[col] = (df_fe[col] - mean) / std
+# --- Streamlit Application Layout ---
 
-for dcol in datetime_cols:
-    d = pd.to_datetime(df_fe[dcol], errors="coerce")
-    df_fe[f"{dcol}_year"] = d.dt.year
-    df_fe[f"{dcol}_month"] = d.dt.month
-    df_fe[f"{dcol}_day"] = d.dt.day
-    df_fe[f"{dcol}_dow"] = d.dt.dayofweek
+st.set_page_config(layout="wide", page_title="Data Preparation & Viz Bot")
 
-for col in df.columns:
-    if df[col].dtype == "object":
-        df_fe[f"{col}_len"] = df[col].astype(str).str.len()
+st.title("🤖 Data Preparation & Visualization Bot")
+st.sidebar.header("Data Upload")
 
-st.subheader("📊 Processed Dataset Preview")
-st.dataframe(df_fe.head(100), use_container_width=True)
+# 1. File Upload
+uploaded_file = st.sidebar.file_uploader("Upload your CSV file", type=["csv"])
 
-# ---------------- Automated Visualizations ----------------
-st.header("📈 Automated Visualizations")
-if px:
-    if numeric_cols:
-        st.subheader("Histograms of Numeric Columns")
-        for col in numeric_cols[:3]:
-            fig = px.histogram(df_clean, x=col)
+if uploaded_file is not None:
+    # Load the original data
+    data_original = pd.read_csv(uploaded_file)
+    
+    st.header("1. Original Data Preview")
+    st.dataframe(data_original.head())
+    st.write(f"Original Shape: {data_original.shape}")
+    st.markdown("---")
+
+    # 2. Automated Steps (Cleaning & Engineering)
+    processed_data, log_messages = automated_cleaning_and_engineering(data_original)
+    
+    st.header("2. Data Preparation Chat Log")
+    st.info("Here is the step-by-step cleaning and feature engineering performed:")
+    
+    # Display the cleaning and engineering steps in a "chatbot" format
+    with st.container(height=350, border=True):
+        for message in log_messages:
+            # Use specific markdown formatting for the main log messages
+            st.markdown(message)
+    st.markdown("---")
+    
+    st.header("3. Cleaned & Engineered Data")
+    st.dataframe(processed_data.head())
+    st.write(f"New Shape: {processed_data.shape}")
+    st.markdown("---")
+
+    # 4. Interactive Visualization Section
+    st.header("4. Interactive Visualizations")
+
+    # Column selection widgets
+    all_columns = processed_data.columns.tolist()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        plot_col_x = st.selectbox("Select X-axis (Primary) column:", all_columns)
+    with col2:
+        plot_type = st.selectbox("Select Plot Type:", ["Histogram/Distribution", "Scatter Plot", "Bar Plot (Counts)"])
+    
+    if plot_col_x:
+        if plot_type == "Histogram/Distribution":
+            if pd.api.types.is_numeric_dtype(processed_data[plot_col_x]):
+                fig = px.histogram(processed_data, x=plot_col_x, marginal="box", 
+                                   title=f'Distribution of {plot_col_x}', 
+                                   height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Please select a *numeric* column for a Histogram/Distribution plot.")
+        
+        elif plot_type == "Scatter Plot":
+            # Require a second column for a scatter plot
+            plot_col_y = st.selectbox("Select Y-axis column for Scatter Plot:", all_columns, index=min(1, len(all_columns)-1))
+            if pd.api.types.is_numeric_dtype(processed_data[plot_col_x]) and pd.api.types.is_numeric_dtype(processed_data[plot_col_y]):
+                fig = px.scatter(processed_data, x=plot_col_x, y=plot_col_y, 
+                                 title=f'Scatter Plot of {plot_col_x} vs {plot_col_y}',
+                                 height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Scatter plots require *two numeric* columns.")
+                
+        elif plot_type == "Bar Plot (Counts)":
+            # Count the values and plot the top 20
+            value_counts = processed_data[plot_col_x].value_counts().head(20).reset_index()
+            value_counts.columns = [plot_col_x, 'Count']
+            
+            fig = px.bar(value_counts, x=plot_col_x, y='Count', 
+                         title=f'Count of Top Categories/Values in {plot_col_x}',
+                         height=400)
             st.plotly_chart(fig, use_container_width=True)
-    if cat_cols:
-        st.subheader("Top Categories")
-        top_col = cat_cols[0]
-        fig = px.bar(df_clean[top_col].value_counts().reset_index(), x="index", y=top_col)
-        st.plotly_chart(fig, use_container_width=True)
-    if len(numeric_cols) > 1:
-        st.subheader("Correlation Heatmap")
-        corr = df_clean[numeric_cols].corr()
-        fig = px.imshow(corr, text_auto=True, aspect="auto")
-        st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- Dashboard ----------------
-st.header("📊 Dashboard")
-col1, col2, col3 = st.columns(3)
-col1.metric("Rows", f"{df_fe.shape[0]:,}")
-col2.metric("Columns", f"{df_fe.shape[1]:,}")
-col3.metric("Missing", int(df.isna().sum().sum()))
+    # 5. Data Download
+    @st.cache_data
+    def convert_df(df):
+        return df.to_csv(index=False).encode('utf-8')
 
-if px and len(numeric_cols) > 1:
-    st.subheader("Scatter Plot")
-    fig = px.scatter(df_clean, x=numeric_cols[0], y=numeric_cols[1])
-    st.plotly_chart(fig, use_container_width=True)
-
-# ---------------- Report ----------------
-st.header("📑 Automated Report")
-if HAS_PROFILING:
-    pr = ProfileReport(df_clean, title="Data Profiling Report", explorative=True)
-    st_profile_report(pr)
+    csv_output = convert_df(processed_data)
+    
+    st.sidebar.download_button(
+        label="Download Cleaned & Engineered CSV",
+        data=csv_output,
+        file_name='cleaned_and_engineered_data.csv',
+        mime='text/csv',
+    )
+    
 else:
-    summary = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "shape": list(df_fe.shape),
-        "columns": df_fe.columns.tolist(),
-        "dtypes": df_fe.dtypes.astype(str).to_dict(),
-        "missing_per_column": df_fe.isna().sum().to_dict(),
-        "numeric_summary": df_fe.describe(include=[np.number]).to_dict(),
-    }
-    st.json(summary)
-
-st.caption("Made with ❤️ Fully Automated Streamlit App. Save as `app.py` and run: `streamlit run app.py`")
+    st.info("Please upload a CSV file in the sidebar to start the automated data preparation process. The bot will detail every cleaning and engineering step!")
