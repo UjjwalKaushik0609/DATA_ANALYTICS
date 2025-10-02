@@ -3,5 +3,3 @@ pandas
 numpy
 plotly
 scikit-learn
-ydata-profiling
-streamlit-ydata-profiling
