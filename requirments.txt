@@ -1,5 +1,22 @@
-streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-plotly==5.22.0
-scikit-learn==1.5.1
+# Core Streamlit application and UI
+streamlit
+
+# Data manipulation and analysis
+pandas
+numpy
+
+# Visualization
+plotly
+
+# Machine Learning and Feature Engineering utilities
+scikit-learn
+
+# PDF Generation (used for creating the summary report)
+reportlab
+
+# Optional: AI Summary generation (used for the Claude integration)
+anthropic
+
+# Optional: Detailed Data Profiling (used if the user checks the ydata-profiling option)
+ydata-profiling
+streamlit-pandas-profiling
